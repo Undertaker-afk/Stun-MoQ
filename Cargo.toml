@@ -1,0 +1,11 @@
+[package]
+name = "stun_moq"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform NAT traversal and E2EE streaming primitives for audio/video/file transport"
+license = "MIT"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+rand = "0.8"
+thiserror = "2"
