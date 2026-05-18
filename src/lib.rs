@@ -1,0 +1,230 @@
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit,
+    aead::{Aead, Error as AeadError, OsRng},
+};
+use rand::RngCore;
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+}
+
+impl IceServer {
+    pub fn stun(url: impl Into<String>) -> Self {
+        Self {
+            urls: vec![url.into()],
+            username: None,
+            credential: None,
+        }
+    }
+}
+
+#[must_use]
+pub fn public_ice_servers() -> Vec<IceServer> {
+    [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+        "stun:stun.cloudflare.com:3478",
+        "stun:stun.nextcloud.com:443",
+        "stun:stun.relay.metered.ca:80",
+        "stun:stun.stunprotocol.org:3478",
+    ]
+    .into_iter()
+    .map(IceServer::stun)
+    .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    Audio,
+    Video,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamProfile {
+    pub kind: StreamKind,
+    pub target_latency_ms: u16,
+    pub target_fps: u16,
+    pub max_bitrate_kbps: u32,
+}
+
+impl StreamProfile {
+    #[must_use]
+    pub fn audio_low_latency() -> Self {
+        Self {
+            kind: StreamKind::Audio,
+            target_latency_ms: 40,
+            target_fps: 0,
+            max_bitrate_kbps: 192,
+        }
+    }
+
+    #[must_use]
+    pub fn video_high_fps() -> Self {
+        Self {
+            kind: StreamKind::Video,
+            target_latency_ms: 50,
+            target_fps: 120,
+            max_bitrate_kbps: 12_000,
+        }
+    }
+
+    #[must_use]
+    pub fn file_transfer() -> Self {
+        Self {
+            kind: StreamKind::File,
+            target_latency_ms: 250,
+            target_fps: 0,
+            max_bitrate_kbps: 50_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionConfig {
+    pub session_name: String,
+    pub ice_servers: Vec<IceServer>,
+    pub profile: StreamProfile,
+}
+
+impl SessionConfig {
+    #[must_use]
+    pub fn new(session_name: impl Into<String>, profile: StreamProfile) -> Self {
+        Self {
+            session_name: session_name.into(),
+            ice_servers: public_ice_servers(),
+            profile,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.session_name.trim().is_empty() {
+            return Err(ConfigError::EmptySessionName);
+        }
+        if self.ice_servers.is_empty() {
+            return Err(ConfigError::MissingIceServers);
+        }
+        if matches!(self.profile.kind, StreamKind::Video) && self.profile.target_fps == 0 {
+            return Err(ConfigError::InvalidVideoFps);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptedFrame {
+    pub nonce: [u8; 12],
+    pub ciphertext: Vec<u8>,
+}
+
+pub struct E2eeChannel {
+    cipher: ChaCha20Poly1305,
+}
+
+impl E2eeChannel {
+    #[must_use]
+    pub fn random() -> Self {
+        let key = ChaCha20Poly1305::generate_key(&mut OsRng);
+        Self {
+            cipher: ChaCha20Poly1305::new(&key),
+        }
+    }
+
+    #[must_use]
+    pub fn from_key_bytes(key: [u8; 32]) -> Self {
+        Self {
+            cipher: ChaCha20Poly1305::new(&key.into()),
+        }
+    }
+
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedFrame, CryptoError> {
+        let mut nonce = [0_u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let ciphertext = self
+            .cipher
+            .encrypt(&nonce.into(), plaintext)
+            .map_err(CryptoError::EncryptionFailed)?;
+
+        Ok(EncryptedFrame { nonce, ciphertext })
+    }
+
+    pub fn decrypt(&self, frame: &EncryptedFrame) -> Result<Vec<u8>, CryptoError> {
+        self.cipher
+            .decrypt(&frame.nonce.into(), frame.ciphertext.as_ref())
+            .map_err(CryptoError::DecryptionFailed)
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ConfigError {
+    #[error("session name cannot be empty")]
+    EmptySessionName,
+    #[error("at least one ICE/STUN server is required")]
+    MissingIceServers,
+    #[error("video profile must set target_fps > 0")]
+    InvalidVideoFps,
+}
+
+#[derive(Debug, Error)]
+pub enum CryptoError {
+    #[error("failed to encrypt frame")]
+    EncryptionFailed(AeadError),
+    #[error("failed to decrypt frame")]
+    DecryptionFailed(AeadError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provides_public_stun_servers() {
+        let servers = public_ice_servers();
+        assert!(servers.len() >= 3);
+        assert!(
+            servers
+                .iter()
+                .all(|server| server.urls.iter().all(|url| url.starts_with("stun:")))
+        );
+    }
+
+    #[test]
+    fn validates_video_profile_fps() {
+        let mut config = SessionConfig::new(
+            "demo",
+            StreamProfile {
+                kind: StreamKind::Video,
+                target_latency_ms: 40,
+                target_fps: 0,
+                max_bitrate_kbps: 8_000,
+            },
+        );
+
+        assert_eq!(config.validate(), Err(ConfigError::InvalidVideoFps));
+
+        config.profile.target_fps = 60;
+        assert_eq!(config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn encrypts_and_decrypts_frames() {
+        let channel = E2eeChannel::from_key_bytes([7; 32]);
+        let frame = channel.encrypt(b"high fps video frame").expect("encrypt");
+        let plain = channel.decrypt(&frame).expect("decrypt");
+        assert_eq!(plain, b"high fps video frame");
+    }
+
+    #[test]
+    fn fails_decrypt_for_wrong_key() {
+        let sender = E2eeChannel::from_key_bytes([1; 32]);
+        let receiver = E2eeChannel::from_key_bytes([2; 32]);
+        let frame = sender.encrypt(b"audio packet").expect("encrypt");
+
+        assert!(receiver.decrypt(&frame).is_err());
+    }
+}
