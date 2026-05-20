@@ -3,6 +3,8 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, debug};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SignalMessage {
@@ -16,6 +18,7 @@ pub enum SignalMessage {
 pub struct NostrSignaling {
     client: Client,
     keys: Keys,
+    running: Arc<AtomicBool>,
 }
 
 impl NostrSignaling {
@@ -32,7 +35,11 @@ impl NostrSignaling {
         // Wait for relay connection to be established
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        Ok(Self { client, keys })
+        Ok(Self {
+            client,
+            keys,
+            running: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     pub fn client(&self) -> &Client {
@@ -55,6 +62,7 @@ impl NostrSignaling {
         debug!("Starting Nostr signal listener...");
         let (tx, rx) = mpsc::channel(100);
         let client = self.client.clone();
+        let running = self.running.clone();
 
         // Use a filter to subscribe only to GiftWrap events
         let filter = Filter::new().kind(Kind::GiftWrap).pubkey(self.keys.public_key());
@@ -62,22 +70,37 @@ impl NostrSignaling {
 
         tokio::spawn(async move {
             let mut notifications = client.notifications();
-            while let Ok(notification) = notifications.recv().await {
-                if let RelayPoolNotification::Event { event, .. } = notification {
-                    if event.kind == Kind::GiftWrap {
-                        if let Ok(unwrapped) = client.unwrap_gift_wrap(&event).await {
-                            if unwrapped.rumor.kind == Kind::PrivateDirectMessage {
-                                if let Ok(msg) = serde_json::from_str::<SignalMessage>(&unwrapped.rumor.content) {
-                                    debug!("Received signal from {}: {:?}", unwrapped.sender, msg);
-                                    let _ = tx.send((unwrapped.sender, msg)).await;
+            while running.load(Ordering::SeqCst) {
+                if let Ok(notification) = tokio::time::timeout(std::time::Duration::from_millis(500), notifications.recv()).await {
+                    match notification {
+                        Ok(RelayPoolNotification::Event { event, .. }) => {
+                            if event.kind == Kind::GiftWrap {
+                                if let Ok(unwrapped) = client.unwrap_gift_wrap(&event).await {
+                                    if unwrapped.rumor.kind == Kind::PrivateDirectMessage {
+                                        if let Ok(msg) = serde_json::from_str::<SignalMessage>(&unwrapped.rumor.content) {
+                                            debug!("Received signal from {}: {:?}", unwrapped.sender, msg);
+                                            if tx.send((unwrapped.sender, msg)).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                        }
+                        },
+                        Err(_) => break,
+                        _ => {}
                     }
                 }
             }
+            debug!("Nostr signal listener stopped.");
         });
 
         Ok(rx)
+    }
+}
+
+impl Drop for NostrSignaling {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
     }
 }
