@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 #[derive(Debug, Deserialize)]
 struct TailscaleDerpMap {
@@ -34,13 +34,12 @@ impl IrohNetworking {
     pub async fn new(secret_key: SecretKey, custom_relays: Vec<String>) -> Result<Self> {
         info!("Initializing Iroh networking with Tailscale DERP support...");
 
-        // Start with Number 0's default relays
         let mut relay_map = RelayMode::Default.relay_map();
 
-        // Dynamically fetch Tailscale DERP servers from the correct login URL
         debug!("Fetching Tailscale DERP map from login.tailscale.com...");
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            .use_rustls_tls()
             .build()?;
 
         if let Ok(response) = client.get("https://login.tailscale.com/derpmap/default").send().await {
@@ -50,24 +49,19 @@ impl IrohNetworking {
                     for node in &region.nodes {
                         let port = node.derp_port.unwrap_or(443);
 
-                        // Root path
-                        let url_str = if port == 443 {
-                            format!("https://{}", node.host_name)
-                        } else {
-                            format!("https://{}:{}", node.host_name, port)
-                        };
-                        if let Ok(url) = url_str.parse::<RelayUrl>() {
-                            relay_map.insert(url.clone(), Arc::new(RelayConfig::from(url)));
-                        }
+                        // We try both the root and /derp path for Tailscale nodes.
+                        // Iroh's relay client will try to upgrade to its custom protocol.
+                        let paths = ["", "/derp"];
+                        for path in paths {
+                            let url_str = if port == 443 {
+                                format!("https://{}{}", node.host_name, path)
+                            } else {
+                                format!("https://{}:{}{}", node.host_name, port, path)
+                            };
 
-                        // /derp path
-                        let url_str_derp = if port == 443 {
-                            format!("https://{}/derp", node.host_name)
-                        } else {
-                            format!("https://{}:{}/derp", node.host_name, port)
-                        };
-                        if let Ok(url) = url_str_derp.parse::<RelayUrl>() {
-                            relay_map.insert(url.clone(), Arc::new(RelayConfig::from(url)));
+                            if let Ok(url) = url_str.parse::<RelayUrl>() {
+                                relay_map.insert(url.clone(), Arc::new(RelayConfig::from(url)));
+                            }
                         }
                     }
                 }
@@ -80,11 +74,10 @@ impl IrohNetworking {
             }
         }
 
-        // Optimize QUIC parameters for high-bandwidth/low-latency
         let transport_config = QuicTransportConfig::builder()
             .max_concurrent_uni_streams(VarInt::from_u32(2048))
-            .stream_receive_window(VarInt::from_u32(1024 * 1024 * 32)) // 32MB
-            .receive_window(VarInt::from_u32(1024 * 1024 * 128)) // 128MB
+            .stream_receive_window(VarInt::from_u32(1024 * 1024 * 32))
+            .receive_window(VarInt::from_u32(1024 * 1024 * 128))
             .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into()?))
             .build();
 
@@ -97,7 +90,6 @@ impl IrohNetworking {
             .bind()
             .await?;
 
-        // Proactively measure latency and establish relay connectivity
         debug!("Finding optimal working relay...");
         endpoint.online().await;
 
