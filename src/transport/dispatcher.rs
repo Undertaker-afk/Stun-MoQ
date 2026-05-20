@@ -174,7 +174,8 @@ impl TransportDispatcher {
 
         if matches!(msg_type, MessageType::Datagram) {
             // Check against QUIC MTU before sending
-            let max_size = self.connection.max_datagram_size();
+            let max_size = self.connection.max_datagram_size()
+                .ok_or_else(|| anyhow::anyhow!("Datagrams not supported on this connection"))?;
             if payload.len() > max_size {
                 return Err(anyhow::anyhow!(
                     "Datagram size {} exceeds max_datagram_size {}",
