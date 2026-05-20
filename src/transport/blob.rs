@@ -1,6 +1,7 @@
 use iroh::endpoint::Connection;
 use anyhow::Result;
 use crate::E2eeChannel;
+use tracing::{info, debug};
 
 /// Specialized transport for large files or binary blobs.
 pub struct BlobTransport {
@@ -16,25 +17,28 @@ impl BlobTransport {
 
     /// Sends a blob of data efficiently.
     pub async fn send_blob(&self, data: &[u8]) -> Result<()> {
-        // Apply compression (useful for text, logs, etc.)
+        info!("Sending blob (len: {} bytes)...", data.len());
+
         let compressed = zstd::encode_all(data, 3)?;
+        debug!("Compressed blob ({} -> {} bytes)", data.len(), compressed.len());
+
         let encrypted = self.crypto.encrypt(&compressed)?;
 
         let mut send_stream = self.connection.open_uni().await?;
-
-        // Protocol: Nonce (12 bytes) + Ciphertext
         send_stream.write_all(&encrypted.nonce).await?;
         send_stream.write_all(&encrypted.ciphertext).await?;
         send_stream.finish()?;
 
+        info!("Blob sent successfully");
         Ok(())
     }
 
     /// Receives a blob.
     pub async fn receive_blob(&self) -> Result<Vec<u8>> {
+        debug!("Waiting for incoming blob...");
         let mut recv_stream = self.connection.accept_uni().await?;
 
-        // Read to end with a 1GB limit for blobs
+        // 1GB limit for blobs
         let payload = recv_stream.read_to_end(1024 * 1024 * 1024).await?;
 
         if payload.len() < 12 {
@@ -47,10 +51,9 @@ impl BlobTransport {
 
         let encrypted = crate::EncryptedFrame { nonce, ciphertext };
         let decrypted = self.crypto.decrypt(&encrypted)?;
-
-        // Decompress to original size
         let decompressed = zstd::decode_all(&decrypted[..])?;
 
+        info!("Received blob successfully (len: {} bytes)", decompressed.len());
         Ok(decompressed)
     }
 }

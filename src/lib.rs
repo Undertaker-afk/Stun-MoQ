@@ -11,6 +11,7 @@ use rand::RngCore;
 use thiserror::Error;
 use std::sync::Arc;
 use dashmap::DashMap;
+use tracing::{info, debug, warn};
 
 /// Re-exports from Iroh for easy access
 pub use ::iroh::endpoint::Connection;
@@ -139,6 +140,8 @@ pub struct StunMoq {
     iroh: IrohNetworking,
     nostr: NostrSignaling,
     peer_channels: Arc<DashMap<PublicKey, E2eeChannel>>,
+    // Use this to map Iroh node IDs to Nostr Pubkeys when they connect
+    pending_conns: Arc<DashMap<::iroh::EndpointId, PublicKey>>,
 }
 
 impl StunMoq {
@@ -147,6 +150,7 @@ impl StunMoq {
         nostr_keys: Option<Keys>,
         relays: Vec<String>,
     ) -> Result<Self> {
+        info!("Creating new StunMoq instance...");
         let iroh_secret = iroh_secret.unwrap_or_else(SecretKey::generate);
         let nostr_keys = nostr_keys.unwrap_or_else(Keys::generate);
 
@@ -157,21 +161,27 @@ impl StunMoq {
             iroh,
             nostr,
             peer_channels: Arc::new(DashMap::new()),
+            pending_conns: Arc::new(DashMap::new()),
         })
     }
 
     pub async fn listen(&self) -> Result<tokio::sync::mpsc::Receiver<(PublicKey, Connection)>> {
+        info!("StunMoq started listening...");
         let mut signal_rx = self.nostr.listen_for_signals().await?;
         let my_addr = self.iroh.addr();
         let nostr = self.nostr.clone();
         let iroh_endpoint = self.iroh.endpoint().clone();
         let peer_channels = self.peer_channels.clone();
+        let pending_conns = self.pending_conns.clone();
 
+        let pending_conns_signal = pending_conns.clone();
         tokio::spawn(async move {
             while let Some((sender_pubkey, msg)) = signal_rx.recv().await {
                 match msg {
-                    SignalMessage::Handshake { node_addr: _, session_key } => {
+                    SignalMessage::Handshake { node_addr, session_key } => {
+                        debug!("Processing handshake signal from {}", sender_pubkey);
                         peer_channels.insert(sender_pubkey, E2eeChannel::from_key_bytes(session_key));
+                        pending_conns_signal.insert(node_addr.id, sender_pubkey);
 
                         let _ = nostr.send_signal(sender_pubkey, SignalMessage::Handshake {
                             node_addr: my_addr.clone(),
@@ -184,11 +194,20 @@ impl StunMoq {
 
         let (conn_tx, conn_rx) = tokio::sync::mpsc::channel(10);
 
+        let pending_conns_accept = pending_conns;
         tokio::spawn(async move {
             while let Some(incoming) = iroh_endpoint.accept().await {
                 if let Ok(conn) = incoming.await {
-                    let dummy_pubkey = PublicKey::from_hex("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
-                    let _ = conn_tx.send((dummy_pubkey, conn)).await;
+                    let node_id = conn.remote_id();
+                    info!("Accepted incoming Iroh connection from {}", node_id);
+
+                    let pubkey = pending_conns_accept.remove(&node_id).map(|(_, v)| v)
+                        .unwrap_or_else(|| {
+                            warn!("Unknown peer connected: {}", node_id);
+                            PublicKey::from_slice(&[0u8; 32]).unwrap()
+                        });
+
+                    let _ = conn_tx.send((pubkey, conn)).await;
                 }
             }
         });
@@ -197,6 +216,7 @@ impl StunMoq {
     }
 
     pub async fn connect(&self, peer_nostr_pubkey: PublicKey) -> Result<Connection> {
+        info!("Connecting to peer {} via Nostr signaling...", peer_nostr_pubkey);
         let my_addr = self.iroh.addr();
         let mut session_key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut session_key);
@@ -215,8 +235,10 @@ impl StunMoq {
                 if sender == peer_nostr_pubkey {
                     match msg {
                         SignalMessage::Handshake { node_addr, session_key: _ } => {
+                            info!("Handshake complete. Dialing Iroh node...");
                             self.peer_channels.insert(peer_nostr_pubkey, E2eeChannel::from_key_bytes(session_key));
                             let conn = self.iroh.endpoint().connect(node_addr, b"stun-moq/0.1").await?;
+                            info!("Successfully connected to {}", peer_nostr_pubkey);
                             return Ok(conn);
                         }
                     }
@@ -224,18 +246,19 @@ impl StunMoq {
             }
         }
 
+        warn!("Failed to connect to {} within timeout", peer_nostr_pubkey);
         Err(anyhow::anyhow!("Handshake timeout: Peer did not respond via Nostr within 30s"))
     }
 
     pub fn stream_transport(&self, peer_pubkey: PublicKey, conn: Connection) -> Result<StreamTransport> {
         let channel = self.peer_channels.get(&peer_pubkey)
-            .ok_or_else(|| anyhow::anyhow!("No E2EE channel established for peer"))?;
+            .ok_or_else(|| anyhow::anyhow!("No E2EE channel established for peer {}", peer_pubkey))?;
         Ok(StreamTransport::new(conn, E2eeChannel::from_key_bytes(channel.key_bytes())))
     }
 
     pub fn blob_transport(&self, peer_pubkey: PublicKey, conn: Connection) -> Result<BlobTransport> {
         let channel = self.peer_channels.get(&peer_pubkey)
-            .ok_or_else(|| anyhow::anyhow!("No E2EE channel established for peer"))?;
+            .ok_or_else(|| anyhow::anyhow!("No E2EE channel established for peer {}", peer_pubkey))?;
         Ok(BlobTransport::new(conn, E2eeChannel::from_key_bytes(channel.key_bytes())))
     }
 

@@ -3,13 +3,9 @@ use anyhow::Result;
 use zstd;
 use bytes::Bytes;
 use crate::E2eeChannel;
+use tracing::{debug, trace};
 
 /// Optimized transport for real-time data streams.
-///
-/// Features:
-/// - Zstd compression for throughput efficiency.
-/// - ChaCha20-Poly1305 for E2EE.
-/// - Support for reliable streams and unreliable datagrams.
 pub struct StreamTransport {
     connection: Connection,
     crypto: E2eeChannel,
@@ -21,11 +17,19 @@ impl StreamTransport {
         Self { connection, crypto }
     }
 
+    /// Returns the underlying Iroh connection.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     /// Sends a single frame of data over a new unidirectional stream.
     /// This prevents Head-of-Line (HOL) blocking between independent frames.
     pub async fn send_frame(&self, data: &[u8]) -> Result<()> {
+        trace!("Sending frame (len: {} bytes)...", data.len());
+
         // 1. Compress
         let compressed = zstd::encode_all(data, 3)?;
+        trace!("Compressed frame ({} -> {} bytes)", data.len(), compressed.len());
 
         // 2. Encrypt
         let encrypted = self.crypto.encrypt(&compressed)?;
@@ -38,11 +42,13 @@ impl StreamTransport {
         send_stream.write_all(&encrypted.ciphertext).await?;
         send_stream.finish()?;
 
+        debug!("Sent frame successfully");
         Ok(())
     }
 
     /// Waits for and receives the next incoming frame.
     pub async fn next_frame(&self) -> Result<Vec<u8>> {
+        trace!("Waiting for next frame...");
         let mut recv_stream = self.connection.accept_uni().await?;
 
         // Read to end with a 10MB limit per frame
@@ -62,6 +68,7 @@ impl StreamTransport {
 
         // 2. Decompress
         let decompressed = zstd::decode_all(&decrypted[..])?;
+        trace!("Received and decompressed frame (len: {} bytes)", decompressed.len());
 
         Ok(decompressed)
     }
@@ -69,6 +76,7 @@ impl StreamTransport {
     /// Sends data via QUIC datagrams for lowest possible latency.
     /// Suitable for loss-tolerant data (e.g., non-reference video frames).
     pub async fn send_datagram(&self, data: &[u8]) -> Result<()> {
+        trace!("Sending datagram (len: {} bytes)...", data.len());
         let compressed = zstd::encode_all(data, 3)?;
         let encrypted = self.crypto.encrypt(&compressed)?;
 
@@ -78,12 +86,14 @@ impl StreamTransport {
 
         // Note: Datagrams have a maximum size limited by MTU
         self.connection.send_datagram(Bytes::from(payload))?;
+        trace!("Sent datagram successfully");
         Ok(())
     }
 
     /// Receives the next available datagram.
     pub async fn next_datagram(&self) -> Result<Vec<u8>> {
         let datagram = self.connection.read_datagram().await?;
+        trace!("Received datagram (len: {} bytes)", datagram.len());
 
         if datagram.len() < 12 {
             return Err(anyhow::anyhow!("Received invalid datagram: too short"));
