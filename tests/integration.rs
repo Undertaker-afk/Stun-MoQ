@@ -41,7 +41,7 @@ async fn test_integration_live_and_blob() -> anyhow::Result<()> {
     let test_data = b"LIVE_FRAME_DATA";
     for i in 0..5 {
         let frame = format!("{}_{}", String::from_utf8_lossy(test_data), i);
-        tx_stream.send_frame(frame.as_bytes()).await?;
+        tx_stream.send_frame(frame.as_bytes().to_vec()).await?;
 
         let received = timeout(Duration::from_secs(10), rx_stream.next_frame()).await??;
         assert_eq!(received, frame.as_bytes());
@@ -53,7 +53,7 @@ async fn test_integration_live_and_blob() -> anyhow::Result<()> {
     let rx_blob = receiver.blob_transport(tx_pubkey, rx_conn)?;
 
     let large_data = vec![0xAF; 1024 * 1024]; // 1MB blob
-    tx_blob.send_blob(&large_data).await?;
+    tx_blob.send_blob(large_data.clone()).await?;
 
     let received_blob = timeout(Duration::from_secs(30), rx_blob.receive_blob()).await??;
     assert_eq!(received_blob.len(), large_data.len());

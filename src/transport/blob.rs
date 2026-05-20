@@ -1,7 +1,8 @@
 use iroh::endpoint::Connection;
 use anyhow::Result;
 use crate::E2eeChannel;
-use tracing::{info, debug};
+use bytes::{Bytes, BytesMut, BufMut};
+use tokio::task;
 
 /// Specialized transport for large files or binary blobs.
 pub struct BlobTransport {
@@ -10,32 +11,34 @@ pub struct BlobTransport {
 }
 
 impl BlobTransport {
-    /// Creates a new `BlobTransport` from an existing connection.
     pub fn new(connection: Connection, crypto: E2eeChannel) -> Self {
         Self { connection, crypto }
     }
 
-    /// Sends a blob of data efficiently.
-    pub async fn send_blob(&self, data: &[u8]) -> Result<()> {
-        info!("Sending blob (len: {} bytes)...", data.len());
+    /// High-throughput blob sending.
+    pub async fn send_blob(&self, data: Vec<u8>) -> Result<()> {
+        let crypto = self.crypto.clone();
 
-        let compressed = zstd::encode_all(data, 3)?;
-        debug!("Compressed blob ({} -> {} bytes)", data.len(), compressed.len());
+        let payload = task::spawn_blocking(move || -> Result<Bytes> {
+            // Level 3 is a good balance for large files
+            let compressed = zstd::encode_all(&data[..], 3)?;
+            let encrypted = crypto.encrypt(&compressed)?;
 
-        let encrypted = self.crypto.encrypt(&compressed)?;
+            let mut packet = BytesMut::with_capacity(12 + encrypted.ciphertext.len());
+            packet.put_slice(&encrypted.nonce);
+            packet.put_slice(&encrypted.ciphertext);
+
+            Ok(packet.freeze())
+        }).await??;
 
         let mut send_stream = self.connection.open_uni().await?;
-        send_stream.write_all(&encrypted.nonce).await?;
-        send_stream.write_all(&encrypted.ciphertext).await?;
+        send_stream.write_all(&payload).await?;
         send_stream.finish()?;
 
-        info!("Blob sent successfully");
         Ok(())
     }
 
-    /// Receives a blob.
     pub async fn receive_blob(&self) -> Result<Vec<u8>> {
-        debug!("Waiting for incoming blob...");
         let mut recv_stream = self.connection.accept_uni().await?;
 
         // 1GB limit for blobs
@@ -45,15 +48,19 @@ impl BlobTransport {
             return Err(anyhow::anyhow!("Received invalid blob: too short"));
         }
 
-        let mut nonce = [0u8; 12];
-        nonce.copy_from_slice(&payload[..12]);
-        let ciphertext = payload[12..].to_vec();
+        let crypto = self.crypto.clone();
+        let decompressed = task::spawn_blocking(move || -> Result<Vec<u8>> {
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&payload[..12]);
+            let ciphertext = &payload[12..];
 
-        let encrypted = crate::EncryptedFrame { nonce, ciphertext };
-        let decrypted = self.crypto.decrypt(&encrypted)?;
-        let decompressed = zstd::decode_all(&decrypted[..])?;
+            let encrypted = crate::EncryptedFrame { nonce, ciphertext: ciphertext.to_vec() };
+            let decrypted = crypto.decrypt(&encrypted)?;
+            let decompressed = zstd::decode_all(&decrypted[..])?;
 
-        info!("Received blob successfully (len: {} bytes)", decompressed.len());
+            Ok(decompressed)
+        }).await??;
+
         Ok(decompressed)
     }
 }

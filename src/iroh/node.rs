@@ -1,5 +1,5 @@
 use iroh::{Endpoint, RelayMode, SecretKey, RelayConfig, RelayUrl};
-use iroh::endpoint::presets;
+use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use std::sync::Arc;
 use anyhow::Result;
 use serde::Deserialize;
@@ -59,10 +59,18 @@ impl IrohNetworking {
             }
         }
 
+        // Optimize QUIC parameters for high-bandwidth/low-latency
+        let transport_config = QuicTransportConfig::builder()
+            .max_concurrent_uni_streams(VarInt::from_u32(1024))
+            .stream_receive_window(VarInt::from_u32(1024 * 1024 * 16)) // 16MB
+            .receive_window(VarInt::from_u32(1024 * 1024 * 64)) // 64MB
+            .build();
+
         info!("Starting Iroh endpoint with {} relays...", relay_map.len());
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .relay_mode(RelayMode::Custom(relay_map))
+            .transport_config(transport_config)
             .alpns(vec![b"stun-moq/0.1".to_vec()])
             .bind()
             .await?;

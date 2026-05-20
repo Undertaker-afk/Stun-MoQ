@@ -87,9 +87,9 @@ pub struct EncryptedFrame {
     pub ciphertext: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub struct E2eeChannel {
     key: [u8; 32],
-    cipher: ChaCha20Poly1305,
 }
 
 impl E2eeChannel {
@@ -100,10 +100,7 @@ impl E2eeChannel {
     }
 
     pub fn from_key_bytes(key: [u8; 32]) -> Self {
-        Self {
-            key,
-            cipher: ChaCha20Poly1305::new(&key.into()),
-        }
+        Self { key }
     }
 
     pub fn key_bytes(&self) -> [u8; 32] {
@@ -111,10 +108,10 @@ impl E2eeChannel {
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> std::result::Result<EncryptedFrame, CryptoError> {
+        let cipher = ChaCha20Poly1305::new(&self.key.into());
         let mut nonce = [0_u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce);
-        let ciphertext = self
-            .cipher
+        let ciphertext = cipher
             .encrypt(&nonce.into(), plaintext)
             .map_err(CryptoError::EncryptionFailed)?;
 
@@ -122,7 +119,8 @@ impl E2eeChannel {
     }
 
     pub fn decrypt(&self, frame: &EncryptedFrame) -> std::result::Result<Vec<u8>, CryptoError> {
-        self.cipher
+        let cipher = ChaCha20Poly1305::new(&self.key.into());
+        cipher
             .decrypt(&frame.nonce.into(), frame.ciphertext.as_ref())
             .map_err(CryptoError::DecryptionFailed)
     }
@@ -140,7 +138,6 @@ pub struct StunMoq {
     iroh: IrohNetworking,
     nostr: NostrSignaling,
     peer_channels: Arc<DashMap<PublicKey, E2eeChannel>>,
-    // Use this to map Iroh node IDs to Nostr Pubkeys when they connect
     pending_conns: Arc<DashMap<::iroh::EndpointId, PublicKey>>,
 }
 

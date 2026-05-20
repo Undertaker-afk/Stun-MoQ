@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         if line.is_empty() { break; }
 
         println!("📤 Sending: {}", line);
-        transport.send_frame(line.as_bytes()).await?;
+        transport.send_frame(line.into_bytes()).await?;
     }
 
     Ok(())
