@@ -2,7 +2,7 @@ use iroh::EndpointAddr;
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{info, debug};
+use tracing::{info, debug, warn, error};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -23,17 +23,33 @@ pub struct NostrSignaling {
 
 impl NostrSignaling {
     pub async fn new(keys: Keys, relays: Vec<String>) -> Result<Self, anyhow::Error> {
-        info!("Initializing Nostr signaling...");
+        info!("Initializing Nostr signaling with {} relays...", relays.len());
         let client = Client::new(keys.clone());
-        for relay in relays {
-            debug!("Adding relay: {}", relay);
-            client.add_relay(relay).await?;
-        }
-        client.connect().await;
-        info!("Nostr signaling connected. Identity: {}", keys.public_key());
 
-        // Wait for relay connection to be established
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        for relay in relays {
+            if let Err(e) = client.add_relay(relay.clone()).await {
+                warn!("Failed to add Nostr relay {}: {}", relay, e);
+            }
+        }
+
+        client.connect().await;
+
+        // Wait for at least one relay to connect
+        let mut connected = false;
+        for _ in 0..10 {
+            let relays = client.relays().await;
+            if relays.values().any(|r| r.is_connected()) {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        if !connected {
+            warn!("No Nostr relays connected yet, signaling may be delayed.");
+        } else {
+            info!("Nostr signaling connected. Identity: {}", keys.public_key());
+        }
 
         Ok(Self {
             client,
@@ -54,6 +70,8 @@ impl NostrSignaling {
         debug!("Sending signal to {}: {:?}", receiver_pubkey, message);
         let content = serde_json::to_string(&message)?;
         let builder = EventBuilder::new(Kind::PrivateDirectMessage, content);
+
+        // Send with retry or to multiple relays is handled by nostr-sdk internally
         self.client.gift_wrap(&receiver_pubkey, builder, None).await?;
         Ok(())
     }
@@ -63,32 +81,42 @@ impl NostrSignaling {
         let (tx, rx) = mpsc::channel(100);
         let client = self.client.clone();
         let running = self.running.clone();
+        let my_pubkey = self.keys.public_key();
 
         // Use a filter to subscribe only to GiftWrap events
-        let filter = Filter::new().kind(Kind::GiftWrap).pubkey(self.keys.public_key());
-        let _ = client.subscribe(vec![filter], None).await;
+        let filter = Filter::new().kind(Kind::GiftWrap).pubkey(my_pubkey);
+        if let Err(e) = client.subscribe(vec![filter], None).await {
+            error!("Failed to subscribe to Nostr events: {}", e);
+            return Err(e.into());
+        }
 
         tokio::spawn(async move {
             let mut notifications = client.notifications();
             while running.load(Ordering::SeqCst) {
-                if let Ok(notification) = tokio::time::timeout(std::time::Duration::from_millis(500), notifications.recv()).await {
-                    match notification {
-                        Ok(RelayPoolNotification::Event { event, .. }) => {
-                            if event.kind == Kind::GiftWrap {
-                                if let Ok(unwrapped) = client.unwrap_gift_wrap(&event).await {
-                                    if unwrapped.rumor.kind == Kind::PrivateDirectMessage {
-                                        if let Ok(msg) = serde_json::from_str::<SignalMessage>(&unwrapped.rumor.content) {
-                                            debug!("Received signal from {}: {:?}", unwrapped.sender, msg);
-                                            if tx.send((unwrapped.sender, msg)).await.is_err() {
-                                                break;
+                tokio::select! {
+                    notification = notifications.recv() => {
+                        match notification {
+                            Ok(RelayPoolNotification::Event { event, .. }) => {
+                                if event.kind == Kind::GiftWrap {
+                                    if let Ok(unwrapped) = client.unwrap_gift_wrap(&event).await {
+                                        if unwrapped.rumor.kind == Kind::PrivateDirectMessage {
+                                            if let Ok(msg) = serde_json::from_str::<SignalMessage>(&unwrapped.rumor.content) {
+                                                debug!("Received signal from {}: {:?}", unwrapped.sender, msg);
+                                                if tx.send((unwrapped.sender, msg)).await.is_err() {
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                        },
-                        Err(_) => break,
-                        _ => {}
+                            },
+                            Ok(RelayPoolNotification::Shutdown) => break,
+                            Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        // Periodic check for 'running' flag if recv is blocked
                     }
                 }
             }

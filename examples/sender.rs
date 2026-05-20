@@ -23,10 +23,10 @@ async fn main() -> anyhow::Result<()> {
     let receiver_pubkey = PublicKey::from_hex(input.trim())?;
 
     println!("📡 Dialing receiver via Nostr signaling...");
-    let conn = stun.connect(receiver_pubkey).await?;
+    let _conn = stun.connect(receiver_pubkey).await?;
     println!("🤝 Connected via P2P (Iroh)!");
 
-    let transport = stun.stream_transport(receiver_pubkey, conn)?;
+    let transport = stun.stream_transport(receiver_pubkey)?;
 
     println!("💬 Enter messages to send (one per line):");
     let stdin = io::stdin();

@@ -21,8 +21,8 @@ async fn main() -> anyhow::Result<()> {
         let stun = StunMoq::new(None, Some(keys), relays).await?;
         let mut conn_rx = stun.listen().await?;
 
-        while let Some((peer_pk, conn)) = conn_rx.recv().await {
-            let transport = stun.stream_transport(peer_pk, conn)?;
+        while let Some((peer_pk, _conn)) = conn_rx.recv().await {
+            let mut transport = stun.stream_transport(peer_pk)?;
             tokio::spawn(async move {
                 loop {
                     if let Ok(data) = transport.next_frame().await {
@@ -37,8 +37,8 @@ async fn main() -> anyhow::Result<()> {
         // Sender: Measures RTT
         let receiver_pubkey = PublicKey::from_hex(&args[2])?;
         let stun = StunMoq::new(None, None, relays).await?;
-        let conn = stun.connect(receiver_pubkey).await?;
-        let transport = stun.stream_transport(receiver_pubkey, conn)?;
+        let _conn = stun.connect(receiver_pubkey).await?;
+        let mut transport = stun.stream_transport(receiver_pubkey)?;
 
         println!("Measuring latency (RTT) for 50 frames...");
         let mut latencies = Vec::new();

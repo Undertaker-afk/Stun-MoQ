@@ -26,6 +26,7 @@ struct Node {
     derp_port: Option<u16>,
 }
 
+#[derive(Clone)]
 pub struct IrohNetworking {
     endpoint: Endpoint,
 }
@@ -34,7 +35,7 @@ impl IrohNetworking {
     pub async fn new(secret_key: SecretKey, custom_relays: Vec<String>) -> Result<Self> {
         info!("Initializing Iroh networking with Tailscale DERP support...");
 
-        let mut relay_map = RelayMode::Default.relay_map();
+        let relay_map = RelayMode::Default.relay_map();
 
         debug!("Fetching Tailscale DERP map from login.tailscale.com...");
         let client = reqwest::Client::builder()
@@ -49,8 +50,6 @@ impl IrohNetworking {
                     for node in &region.nodes {
                         let port = node.derp_port.unwrap_or(443);
 
-                        // We try both the root and /derp path for Tailscale nodes.
-                        // Iroh's relay client will try to upgrade to its custom protocol.
                         let paths = ["", "/derp"];
                         for path in paths {
                             let url_str = if port == 443 {
@@ -103,5 +102,9 @@ impl IrohNetworking {
 
     pub fn addr(&self) -> iroh::EndpointAddr {
         self.endpoint.addr()
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = self.endpoint.close().await;
     }
 }

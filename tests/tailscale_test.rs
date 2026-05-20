@@ -1,39 +1,47 @@
-use stun_moq::{StunMoq, Keys, PublicKey};
+use stun_moq::{StunMoq, Keys};
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::test]
-async fn test_tailscale_derp_only() -> anyhow::Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
-        .try_init();
-
-    // Use a public relay for signaling
+async fn test_p2p_connection_via_tailscale_derp() -> anyhow::Result<()> {
+    // 1. Setup two peers with distinct keys
     let relays = vec!["wss://relay.damus.io".to_string()];
 
-    // 1. Setup Receiver with ONLY Tailscale DERP
     let rx_keys = Keys::generate();
     let rx_pubkey = rx_keys.public_key();
-
-    // We'll pass an empty custom_relays but then the library will fetch Tailscale ones.
-    // To ensure ONLY Tailscale are used, I might need to modify the library or the RelayMap.
-    // For now, let's just see if it uses them.
     let receiver = StunMoq::new(None, Some(rx_keys), relays.clone()).await?;
+
+    let tx_keys = Keys::generate();
+    let sender = StunMoq::new(None, Some(tx_keys), relays.clone()).await?;
+
+    // 2. Receiver starts listening
     let mut incoming_conns = receiver.listen().await?;
 
-    // 2. Setup Sender
-    let tx_keys = Keys::generate();
-    let sender = StunMoq::new(None, Some(tx_keys), relays).await?;
-
-    // 3. Perform Handshake and Connect
-    println!("Connecting...");
-    let tx_conn = timeout(Duration::from_secs(60), sender.connect(rx_pubkey)).await??;
+    // 3. Sender connects to receiver
+    println!("Connecting from sender to receiver...");
+    let _tx_conn = timeout(Duration::from_secs(60), sender.connect(rx_pubkey)).await??;
     println!("Connected.");
 
-    let transport = sender.stream_transport(rx_pubkey, tx_conn)?;
-    transport.send_frame(b"TailscaleTest".to_vec()).await?;
-    println!("Sent frame.");
+    // 4. Test Stream (Reliable)
+    let mut tx_transport = sender.stream_transport(rx_pubkey)?;
+    tx_transport.send_frame(b"ReliableStream".to_vec()).await?;
+    println!("Sent reliable frame.");
+
+    // Accepted on receiver side
+    let (peer_pk, _rx_conn) = timeout(Duration::from_secs(10), incoming_conns.recv()).await?.unwrap();
+    let mut rx_transport = receiver.stream_transport(peer_pk)?;
+
+    let frame = timeout(Duration::from_secs(10), rx_transport.next_frame()).await??;
+    assert_eq!(frame, b"ReliableStream");
+    println!("Received reliable frame.");
+
+    // 5. Test Datagram (Unreliable)
+    tx_transport.send_datagram(b"UnreliableDatagram".to_vec()).await?;
+    println!("Sent datagram.");
+
+    let dg = timeout(Duration::from_secs(10), rx_transport.next_datagram()).await??;
+    assert_eq!(dg, b"UnreliableDatagram");
+    println!("Received datagram.");
 
     Ok(())
 }

@@ -23,10 +23,10 @@ async fn main() -> anyhow::Result<()> {
     println!("📡 Listening for incoming connections via Nostr signaling...");
     let mut conn_rx = stun.listen().await?;
 
-    while let Some((peer_pubkey, conn)) = conn_rx.recv().await {
+    while let Some((peer_pubkey, _conn)) = conn_rx.recv().await {
         println!("🤝 Accepted connection from peer: {}", peer_pubkey);
 
-        let transport = stun.stream_transport(peer_pubkey, conn)?;
+        let mut transport = stun.stream_transport(peer_pubkey)?;
 
         tokio::spawn(async move {
             println!("📥 Waiting for data frames...");

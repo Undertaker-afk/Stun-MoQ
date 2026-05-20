@@ -25,18 +25,18 @@ async fn test_integration_live_and_blob() -> anyhow::Result<()> {
 
     // 3. Perform Handshake and Connect (Sender -> Receiver)
     println!("Connecting sender to receiver {}...", rx_pubkey);
-    let tx_conn = timeout(Duration::from_secs(60), sender.connect(rx_pubkey)).await??;
+    let _tx_conn = timeout(Duration::from_secs(60), sender.connect(rx_pubkey)).await??;
     println!("Sender connected.");
 
     // 4. Accept connection on Receiver side
-    let (peer_pk, rx_conn) = timeout(Duration::from_secs(30), incoming_conns.recv()).await?
+    let (peer_pk, _rx_conn) = timeout(Duration::from_secs(30), incoming_conns.recv()).await?
         .ok_or_else(|| anyhow::anyhow!("No incoming connection"))?;
     println!("Receiver accepted connection from {}.", peer_pk);
     assert_eq!(peer_pk, tx_pubkey);
 
     // --- TEST A: LIVE DATA STREAM ---
-    let tx_stream = sender.stream_transport(rx_pubkey, tx_conn)?;
-    let rx_stream = receiver.stream_transport(tx_pubkey, rx_conn.clone())?;
+    let tx_stream = sender.stream_transport(rx_pubkey)?;
+    let mut rx_stream = receiver.stream_transport(tx_pubkey)?;
 
     let test_data = b"LIVE_FRAME_DATA";
     for i in 0..5 {
@@ -49,8 +49,8 @@ async fn test_integration_live_and_blob() -> anyhow::Result<()> {
     }
 
     // --- TEST B: BLOB TRANSFER ---
-    let tx_blob = sender.blob_transport(rx_pubkey, tx_stream.connection().clone())?; // Reuse connection
-    let rx_blob = receiver.blob_transport(tx_pubkey, rx_conn)?;
+    let tx_blob = sender.blob_transport(rx_pubkey)?;
+    let mut rx_blob = receiver.blob_transport(tx_pubkey)?;
 
     let large_data = vec![0xAF; 1024 * 1024]; // 1MB blob
     tx_blob.send_blob(large_data.clone()).await?;
