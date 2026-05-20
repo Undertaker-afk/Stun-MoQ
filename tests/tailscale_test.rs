@@ -4,8 +4,19 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_p2p_connection_via_tailscale_derp() -> anyhow::Result<()> {
+    // Check if network tests are enabled
+    if std::env::var("RUN_NETWORK_TESTS").unwrap_or_default() != "true" {
+        println!("Skipping network test (set RUN_NETWORK_TESTS=true to enable)");
+        return Ok(());
+    }
+
+    // Get relay from environment
+    let relay_url = std::env::var("TEST_TAILSCALE_RELAY")
+        .map_err(|_| anyhow::anyhow!("TEST_TAILSCALE_RELAY environment variable not set"))?;
+    println!("Using relay: {}", relay_url);
+
     // 1. Setup two peers with distinct keys
-    let relays = vec!["wss://relay.damus.io".to_string()];
+    let relays = vec![relay_url];
 
     let rx_keys = Keys::generate();
     let rx_pubkey = rx_keys.public_key();

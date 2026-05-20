@@ -5,7 +5,7 @@ use iroh::endpoint::{ConnectionError, ConnectError};
 #[derive(Debug, Error)]
 pub enum StunMoqError {
     #[error("Iroh networking error: {0}")]
-    Iroh(#[from] anyhow::Error),
+    Iroh(String),
 
     #[error("QUIC connection error: {0}")]
     Connection(#[from] ConnectionError),
@@ -33,6 +33,9 @@ pub enum StunMoqError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Internal error: {0}")]
+    Internal(#[from] anyhow::Error),
 }
 
 pub type Result<T> = std::result::Result<T, StunMoqError>;

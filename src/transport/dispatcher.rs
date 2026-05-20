@@ -65,13 +65,15 @@ impl TransportDispatcher {
             let crypto = self.crypto.clone();
 
             tokio::spawn(async move {
-                match recv_stream.read_to_end(1024 * 1024 * 1024).await {
+                // Enforce strict maximum size: 100 MB for streams
+                const MAX_STREAM_SIZE: usize = 100 * 1024 * 1024;
+                match recv_stream.read_to_end(MAX_STREAM_SIZE).await {
                     Ok(payload) => {
                         if payload.is_empty() { return; }
                         let header = payload[0];
 
-                        if payload.len() < 13 {
-                            warn!("Received invalid payload: too short");
+                        if payload.len() < 14 {
+                            warn!("Received invalid payload: too short (minimum 14 bytes required)");
                             return;
                         }
 
@@ -142,8 +144,16 @@ impl TransportDispatcher {
                     Ok(decompressed)
                 }).await;
 
-                if let Ok(Ok(data)) = result {
-                    let _ = datagram_dispatcher.send(data).await;
+                match result {
+                    Ok(Ok(data)) => {
+                        let _ = datagram_dispatcher.send(data).await;
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Failed to decrypt/decompress datagram: {}", e);
+                    }
+                    Err(e) => {
+                        error!("Datagram processing task failed: {}", e);
+                    }
                 }
             });
         }
@@ -163,6 +173,15 @@ impl TransportDispatcher {
         }).await??;
 
         if matches!(msg_type, MessageType::Datagram) {
+            // Check against QUIC MTU before sending
+            let max_size = self.connection.max_datagram_size();
+            if payload.len() > max_size {
+                return Err(anyhow::anyhow!(
+                    "Datagram size {} exceeds max_datagram_size {}",
+                    payload.len(),
+                    max_size
+                ).into());
+            }
             self.connection.send_datagram(payload.into())?;
         } else {
             let mut send_stream = self.connection.open_uni().await?;

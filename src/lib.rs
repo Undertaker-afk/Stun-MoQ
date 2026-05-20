@@ -212,14 +212,23 @@ impl StunMoq {
                     let node_id = conn.remote_id();
                     info!("Accepted incoming Iroh connection from {}", node_id);
 
-                    let pubkey = pending_conns_accept.remove(&node_id).map(|(_, v)| v)
-                        .unwrap_or_else(|| {
-                            warn!("Unknown peer connected: {}", node_id);
-                            PublicKey::from_slice(&[0u8; 32]).unwrap()
-                        });
+                    let pubkey = match pending_conns_accept.remove(&node_id).map(|(_, v)| v) {
+                        Some(pk) => pk,
+                        None => {
+                            warn!("Unknown peer connected: {}, closing connection", node_id);
+                            let _ = conn.close(0u32.into(), b"unknown peer");
+                            continue;
+                        }
+                    };
 
-                    let crypto = peer_channels_accept.get(&pubkey).map(|c| c.clone())
-                        .unwrap_or_else(|| E2eeChannel::random());
+                    let crypto = match peer_channels_accept.get(&pubkey).map(|c| c.clone()) {
+                        Some(c) => c,
+                        None => {
+                            warn!("No E2EE channel found for peer {}, closing connection", pubkey);
+                            let _ = conn.close(0u32.into(), b"no encryption channel");
+                            continue;
+                        }
+                    };
 
                     let (dispatcher, s_rx, b_rx, d_rx) = TransportDispatcher::new(conn.clone(), crypto);
                     active_dispatchers.insert(pubkey, dispatcher);

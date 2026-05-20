@@ -34,21 +34,15 @@ impl NostrSignaling {
 
         client.connect().await;
 
-        // Wait for at least one relay to connect
-        let mut connected = false;
-        for _ in 0..10 {
-            let relays = client.relays().await;
-            if relays.values().any(|r| r.is_connected()) {
-                connected = true;
-                break;
+        // Attempt to wait for connection with timeout
+        let connection_timeout = std::time::Duration::from_secs(5);
+        match tokio::time::timeout(connection_timeout, client.connection()).await {
+            Ok(()) => {
+                info!("Nostr signaling connected. Identity: {}", keys.public_key());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-
-        if !connected {
-            warn!("No Nostr relays connected yet, signaling may be delayed.");
-        } else {
-            info!("Nostr signaling connected. Identity: {}", keys.public_key());
+            Err(_) => {
+                warn!("No Nostr relays connected within {}s, signaling may be delayed.", connection_timeout.as_secs());
+            }
         }
 
         Ok(Self {
