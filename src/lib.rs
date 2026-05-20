@@ -214,6 +214,10 @@ impl StunMoq {
 
     pub async fn connect(&self, peer_nostr_pubkey: PublicKey) -> Result<Connection> {
         info!("Connecting to peer {} via Nostr signaling...", peer_nostr_pubkey);
+
+        // Start listening BEFORE sending the handshake to avoid races
+        let mut signal_rx = self.nostr.listen_for_signals().await?;
+
         let my_addr = self.iroh.addr();
         let mut session_key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut session_key);
@@ -223,7 +227,6 @@ impl StunMoq {
             session_key,
         }).await?;
 
-        let mut signal_rx = self.nostr.listen_for_signals().await?;
         let timeout = std::time::Duration::from_secs(30);
         let start = std::time::Instant::now();
 

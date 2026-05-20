@@ -22,6 +22,8 @@ struct Region {
 struct Node {
     #[serde(rename = "HostName")]
     host_name: String,
+    #[serde(rename = "DERPPort")]
+    derp_port: Option<u16>,
 }
 
 pub struct IrohNetworking {
@@ -33,14 +35,20 @@ impl IrohNetworking {
         info!("Initializing Iroh networking...");
         let relay_map = RelayMode::Default.relay_map();
 
-        // Dynamically fetch Tailscale DERP servers
-        debug!("Fetching Tailscale DERP map...");
-        if let Ok(response) = reqwest::get("https://controlplane.tailscale.com/derpmap/default").await {
+        // Dynamically fetch Tailscale DERP servers from the correct URL
+        debug!("Fetching Tailscale DERP map from login.tailscale.com...");
+        if let Ok(response) = reqwest::get("https://login.tailscale.com/derpmap/default").await {
             if let Ok(derp_map) = response.json::<TailscaleDerpMap>().await {
                 debug!("Fetched {} DERP regions", derp_map.region_map.len());
                 for region in derp_map.region_map.values() {
                     for node in &region.nodes {
-                        let url_str = format!("https://{}", node.host_name);
+                        let port = node.derp_port.unwrap_or(443);
+                        let url_str = if port == 443 {
+                            format!("https://{}", node.host_name)
+                        } else {
+                            format!("https://{}:{}", node.host_name, port)
+                        };
+
                         if let Ok(url) = url_str.parse::<RelayUrl>() {
                             relay_map.insert(url.clone(), Arc::new(RelayConfig::from(url)));
                         }
@@ -50,7 +58,7 @@ impl IrohNetworking {
                 warn!("Failed to parse Tailscale DERP map JSON");
             }
         } else {
-            warn!("Failed to fetch Tailscale DERP map, using defaults");
+            warn!("Failed to fetch Tailscale DERP map from login.tailscale.com");
         }
 
         for url_str in custom_relays {
@@ -75,7 +83,11 @@ impl IrohNetworking {
             .bind()
             .await?;
 
-        info!("Iroh endpoint bound to {}", endpoint.id());
+        // Wait for the endpoint to find its home relay (latency-based selection)
+        debug!("Waiting for endpoint to find optimal home relay...");
+        endpoint.online().await;
+
+        info!("Iroh endpoint online. Node ID: {}", endpoint.id());
         Ok(Self { endpoint })
     }
 
